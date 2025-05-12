@@ -132,7 +132,8 @@ core.info(`Running in ${baseDir}`);
         let filesize = 0;
 
         try {
-          filesize = fs.statSync(filepath).size;
+          const stat = await fs.promises.stat(filepath);
+          filesize = stat.size;
         } catch {
           filesize = 0;
         }
@@ -169,10 +170,11 @@ core.info(`Running in ${baseDir}`);
     core.info('> Creating commit...');
     const sha: string[] = [];
 
-    chunks.forEach(async (chunk, index) => {
+    for (const [index, chunk] of chunks.entries()) {
       core.info(
         `> Committing chunk ${index}, count: ${chunk.files.length}, size: ${chunk.size}`,
       );
+
       await git.add(chunk.files, log).catch((e: Error) => {
         if (
           e.message.includes('fatal: pathspec') &&
@@ -182,24 +184,32 @@ core.info(`Running in ${baseDir}`);
 
           const peh = getInput('pathspec_error_handling'),
             err = new Error(
-              `Add command did not match any file: git add ${chunk.files}`,
+              `Add command did not match any file: git add ${chunk.files.join(' ')}`,
             );
           if (peh === 'exitImmediately') throw err;
-          if (peh === 'exitAtEnd') exitErrors.push(err);
-        } else throw e;
+          if (peh === 'exitAtEnd') {
+            exitErrors.push(err);
+            return;
+          }
+        } else {
+          throw e;
+        }
       });
 
-      await git
-        .commit(getInput('message'), matchGitArgs(getInput('commit') || ''))
-        .then(async data => {
-          log(undefined, data);
-          setOutput('committed', 'true');
-          setOutput('commit_long_sha', data.commit);
-          setOutput('commit_sha', data.commit.substring(0, 7));
-          sha.push(data.commit);
-        })
-        .catch(err => core.setFailed(err));
-    });
+      try {
+        const data = await git.commit(
+          getInput('message'),
+          matchGitArgs(getInput('commit') || ''),
+        );
+        log(undefined, data);
+        setOutput('committed', 'true');
+        setOutput('commit_long_sha', data.commit);
+        setOutput('commit_sha', data.commit.substring(0, 7));
+        sha.push(data.commit);
+      } catch (err) {
+        core.setFailed(err instanceof Error ? err.message : String(err));
+      }
+    }
 
     if (getInput('tag')) {
       core.info('> Tagging commit...');
@@ -232,34 +242,18 @@ core.info(`Running in ${baseDir}`);
       core.info('> Pushing commit to repo...');
 
       if (pushOption === true) {
-        for (const commit in sha) {
-          core.debug(
-            `Running: git push origin ${commit}${
-              getInput('new_branch') || ''
-            } --set-upstream`,
-          );
+        core.info('> Pushing commit to repo...');
+        const branch =
+          getInput('new_branch') ||
+          (await git.revparse({'--abbrev-ref': 'HEAD'}));
+
+        for (const commit of sha) {
+          core.debug(`Running: git push origin ${commit}:${branch}`);
+
           await git.push(
             'origin',
-            `${commit}:${getInput('new_branch')}`,
+            `${commit}:${branch}`,
             {'--set-upstream': null},
-            (err, data?) => {
-              if (data) setOutput('pushed', 'true');
-              return log(err, data);
-            },
-          );
-        }
-      } else {
-        const branch = await git.revparse({'--abbrev-ref': 'HEAD'});
-
-        for (const commit in sha) {
-          core.debug(
-            `Running: git push origin ${commit}:${branch} ${pushOption}`,
-          );
-
-          await git.push(
-            'origin',
-            `${sha}:${branch}`,
-            matchGitArgs(pushOption),
             (err, data?) => {
               if (data) setOutput('pushed', 'true');
               return log(err, data);
