@@ -245,7 +245,7 @@ core.info(`Running in ${baseDir}`);
         core.info('> Pushing commit to repo...');
         const branch =
           getInput('new_branch') ||
-          (await git.revparse({'--abbrev-ref': 'HEAD'}));
+          (await git.revparse(['--abbrev-ref', 'HEAD']));
 
         for (const commit of sha) {
           core.debug(`Running: git push origin ${commit}:${branch}`);
