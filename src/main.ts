@@ -1,6 +1,7 @@
 import * as core from '@actions/core';
 import * as path from 'path';
-import simpleGit, {Response} from 'simple-git';
+import * as fs from 'node:fs';
+import simpleGit, {FileStatusResult, Response} from 'simple-git';
 import {checkInputs, getInput, logOutputs, setOutput} from './io';
 import {log, matchGitArgs, parseInputArray} from './util';
 
@@ -8,6 +9,15 @@ const baseDir = path.join(process.cwd(), getInput('cwd') || '');
 const git = simpleGit({baseDir});
 
 const exitErrors: Error[] = [];
+
+interface File extends FileStatusResult {
+  size: number;
+}
+
+interface Chunk {
+  files: string[];
+  size: number;
+}
 
 core.info(`Running in ${baseDir}`);
 (async () => {
@@ -102,9 +112,9 @@ core.info(`Running in ${baseDir}`);
 
       if (!status.conflicted.length) {
         core.info('> No conflicts found.');
-        core.info('> Re-staging files...');
-        if (getInput('add')) await add(ignoreErrors);
-        if (getInput('remove')) await remove(ignoreErrors);
+        // core.info('> Re-staging files...');
+        // if (getInput('add')) await add(ignoreErrors);
+        // if (getInput('remove')) await remove(ignoreErrors);
       } else
         throw new Error(
           `There are ${
@@ -113,7 +123,97 @@ core.info(`Running in ${baseDir}`);
         );
     } else core.info('> Not pulling from repo.');
 
+    // handle git push limit 2000MB
+    core.info('> Checking file(s)...');
+    const status = await git.status({'--porcelain': null}, log);
+    const files: File[] = await Promise.all(
+      status.files.map(async file => {
+        const filepath = path.resolve(file.path);
+        let filesize = 0;
+
+        try {
+          filesize = fs.statSync(filepath).size;
+        } catch {
+          filesize = 0;
+        }
+
+        return {
+          path: file.path,
+          size: filesize,
+          index: file.index,
+          working_dir: file.working_dir,
+        };
+      }),
+    );
+
+    core.info('> Building chunk(s)...');
+    const chunks: Chunk[] = [];
+    const limit: number = 18 * 1024 * 1024;
+    let current: Chunk = {files: [], size: 0};
+
+    files.forEach(file => {
+      if (current.size + file.size > limit) {
+        chunks.push(current);
+        current = {files: [], size: 0};
+      }
+
+      current.files.push(file.path);
+      current.size += file.size;
+    });
+
     core.info('> Creating commit...');
+    const sha: string[] = [];
+
+    chunks.forEach(async (chunk, index) => {
+      core.info(
+        `> Committing chunk ${index}, count: ${chunk.files.length}, size: ${chunk.size}`,
+      );
+      await git.add(chunk.files, log).catch((e: Error) => {
+        if (
+          e.message.includes('fatal: pathspec') &&
+          e.message.includes('did not match any files')
+        ) {
+          if (ignoreErrors === 'pathspec') return;
+
+          const peh = getInput('pathspec_error_handling'),
+            err = new Error(
+              `Add command did not match any file: git add ${chunk.files}`,
+            );
+          if (peh === 'exitImmediately') throw err;
+          if (peh === 'exitAtEnd') exitErrors.push(err);
+        } else throw e;
+      });
+
+      sha.push(
+        await git
+          .commit(getInput('message'), matchGitArgs(getInput('commit') || ''))
+          .then(async data => {
+            log(undefined, data);
+            return data.commit;
+          }),
+      );
+    });
+
+    core.info(
+      `> Committing chunk ${chunks.length}, count: ${current.files.length}, size: ${current.size}`,
+    );
+
+    await git.add(current.files, log).catch((e: Error) => {
+      if (
+        e.message.includes('fatal: pathspec') &&
+        e.message.includes('did not match any files')
+      ) {
+        if (ignoreErrors === 'pathspec') return;
+
+        const peh = getInput('pathspec_error_handling'),
+          err = new Error(
+            `Add command did not match any file: git add ${current.files}`,
+          );
+        if (peh === 'exitImmediately') throw err;
+        if (peh === 'exitAtEnd') exitErrors.push(err);
+      } else throw e;
+    });
+
     await git
       .commit(getInput('message'), matchGitArgs(getInput('commit') || ''))
       .then(async data => {
@@ -121,6 +221,8 @@ core.info(`Running in ${baseDir}`);
         setOutput('committed', 'true');
         setOutput('commit_long_sha', data.commit);
         setOutput('commit_sha', data.commit.substring(0, 7));
+
+        sha.push(data.commit);
       })
       .catch(err => core.setFailed(err));
 
@@ -155,31 +257,40 @@ core.info(`Running in ${baseDir}`);
       core.info('> Pushing commit to repo...');
 
       if (pushOption === true) {
-        core.debug(
-          `Running: git push origin ${
-            getInput('new_branch') || ''
-          } --set-upstream`,
-        );
-        await git.push(
-          'origin',
-          getInput('new_branch'),
-          {'--set-upstream': null},
-          (err, data?) => {
-            if (data) setOutput('pushed', 'true');
-            return log(err, data);
-          },
-        );
+        for (const commit in sha) {
+          core.debug(
+            `Running: git push origin ${commit}${
+              getInput('new_branch') || ''
+            } --set-upstream`,
+          );
+          await git.push(
+            'origin',
+            `${commit}:${getInput('new_branch')}`,
+            {'--set-upstream': null},
+            (err, data?) => {
+              if (data) setOutput('pushed', 'true');
+              return log(err, data);
+            },
+          );
+        }
       } else {
-        core.debug(`Running: git push ${pushOption}`);
-        await git.push(
-          undefined,
-          undefined,
-          matchGitArgs(pushOption),
-          (err, data?) => {
-            if (data) setOutput('pushed', 'true');
-            return log(err, data);
-          },
-        );
+        const branch = await git.revparse({'--abbrev-ref': 'HEAD'});
+
+        for (const commit in sha) {
+          core.debug(
+            `Running: git push origin ${commit}:${branch} ${pushOption}`,
+          );
+
+          await git.push(
+            'origin',
+            `${sha}:${branch}`,
+            matchGitArgs(pushOption),
+            (err, data?) => {
+              if (data) setOutput('pushed', 'true');
+              return log(err, data);
+            },
+          );
+        }
       }
 
       if (getInput('tag')) {
