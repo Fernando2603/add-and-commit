@@ -39,8 +39,8 @@ core.info(`Running in ${baseDir}`);
   //   await remove(ignoreErrors);
   // } else core.info('> No files to remove.');
 
-  core.info('> Checking for uncommitted changes in the git working tree...');
-  const changedFiles = (await git.diffSummary(['--cached'])).files.length;
+  core.info('> Checking for changes in the git working tree...');
+  const changedFiles = (await git.status(undefined, log)).files.length;
   // continue if there are any changes or if the allow-empty commit argument is included
   if (
     changedFiles > 0 ||
