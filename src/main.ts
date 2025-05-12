@@ -29,15 +29,15 @@ core.info(`Running in ${baseDir}`);
   const ignoreErrors =
     getInput('pathspec_error_handling') === 'ignore' ? 'pathspec' : 'none';
 
-  if (getInput('add')) {
-    core.info('> Adding files...');
-    await add(ignoreErrors);
-  } else core.info('> No files to add.');
+  // if (getInput('add')) {
+  //   core.info('> Adding files...');
+  //   await add(ignoreErrors);
+  // } else core.info('> No files to add.');
 
-  if (getInput('remove')) {
-    core.info('> Removing files...');
-    await remove(ignoreErrors);
-  } else core.info('> No files to remove.');
+  // if (getInput('remove')) {
+  //   core.info('> Removing files...');
+  //   await remove(ignoreErrors);
+  // } else core.info('> No files to remove.');
 
   core.info('> Checking for uncommitted changes in the git working tree...');
   const changedFiles = (await git.diffSummary(['--cached'])).files.length;
@@ -146,9 +146,10 @@ core.info(`Running in ${baseDir}`);
       }),
     );
 
+    const limit: number = 1800 * 1024 * 1024;
+
     core.info('> Building chunk(s)...');
     const chunks: Chunk[] = [];
-    const limit: number = 18 * 1024 * 1024;
     let current: Chunk = {files: [], size: 0};
 
     files.forEach(file => {
@@ -160,6 +161,10 @@ core.info(`Running in ${baseDir}`);
       current.files.push(file.path);
       current.size += file.size;
     });
+
+    if (current.files.length) {
+      chunks.push(current);
+    }
 
     core.info('> Creating commit...');
     const sha: string[] = [];
@@ -184,47 +189,17 @@ core.info(`Running in ${baseDir}`);
         } else throw e;
       });
 
-      sha.push(
-        await git
-          .commit(getInput('message'), matchGitArgs(getInput('commit') || ''))
-          .then(async data => {
-            log(undefined, data);
-            return data.commit;
-          }),
-      );
+      await git
+        .commit(getInput('message'), matchGitArgs(getInput('commit') || ''))
+        .then(async data => {
+          log(undefined, data);
+          setOutput('committed', 'true');
+          setOutput('commit_long_sha', data.commit);
+          setOutput('commit_sha', data.commit.substring(0, 7));
+          sha.push(data.commit);
+        })
+        .catch(err => core.setFailed(err));
     });
-
-    core.info(
-      `> Committing chunk ${chunks.length}, count: ${current.files.length}, size: ${current.size}`,
-    );
-
-    await git.add(current.files, log).catch((e: Error) => {
-      if (
-        e.message.includes('fatal: pathspec') &&
-        e.message.includes('did not match any files')
-      ) {
-        if (ignoreErrors === 'pathspec') return;
-
-        const peh = getInput('pathspec_error_handling'),
-          err = new Error(
-            `Add command did not match any file: git add ${current.files}`,
-          );
-        if (peh === 'exitImmediately') throw err;
-        if (peh === 'exitAtEnd') exitErrors.push(err);
-      } else throw e;
-    });
-
-    await git
-      .commit(getInput('message'), matchGitArgs(getInput('commit') || ''))
-      .then(async data => {
-        log(undefined, data);
-        setOutput('committed', 'true');
-        setOutput('commit_long_sha', data.commit);
-        setOutput('commit_sha', data.commit.substring(0, 7));
-
-        sha.push(data.commit);
-      })
-      .catch(err => core.setFailed(err));
 
     if (getInput('tag')) {
       core.info('> Tagging commit...');
