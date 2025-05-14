@@ -128,7 +128,7 @@ core.info(`Running in ${baseDir}`);
     const status = await git.status({'--porcelain': null}, log);
     const files: File[] = await Promise.all(
       status.files.map(async file => {
-        const filepath = path.resolve(file.path);
+        const filepath = path.resolve(baseDir, file.path);
         let filesize = 0;
 
         try {
